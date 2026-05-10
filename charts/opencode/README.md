@@ -4,7 +4,7 @@ Headless [opencode](https://opencode.ai) AI coding agent server on Kubernetes.
 
 | Field            | Value          |
 |------------------|----------------|
-| Chart version    | 0.1.0          |
+| Chart version    | 0.2.0          |
 | App version      | 1.14.40        |
 | Min `kubeVersion`| `>=1.27.0-0`   |
 | Image            | `ghcr.io/lurodrisilva/harness:1.14.40` (override `image.repository`) |
@@ -113,11 +113,14 @@ kubectl --namespace opencode delete pvc opencode-data opencode-config
 
 ### Providers
 
-| Key                            | Default | Notes |
-|--------------------------------|---------|-------|
-| `providers.existingSecret`     | `""`    | Skips chart Secret. Expected keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`. |
-| `providers.openaiKey`          | `""`    | Inline key (chart Secret only). |
-| `providers.anthropicKey`       | `""`    | Inline key (chart Secret only). |
+| Key                                  | Default       | Notes |
+|--------------------------------------|---------------|-------|
+| `providers.existingSecret`           | `""`          | Skips chart Secret. Expected keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`. |
+| `providers.openaiKey`                | `""`          | Inline key (chart Secret only). |
+| `providers.anthropicKey`             | `""`          | Inline key (chart Secret only). |
+| `providers.copilot.existingSecret`   | `""`          | Secret holding the GitHub Copilot OAuth `auth.json`. When set, an initContainer seeds the data PVC on first start. Requires `persistence.data.enabled=true` (schema-enforced). |
+| `providers.copilot.secretKey`        | `auth.json`   | Key inside the Secret. |
+| `providers.copilot.initImage`        | `busybox:1.37.0` | Image for the seeding initContainer. Override for air-gapped clusters. |
 
 > **Provider keys + Helm release storage.** Inline `openaiKey` / `anthropicKey`
 > are stored in the chart-managed Secret AND in the Helm release object
@@ -129,6 +132,44 @@ kubectl --namespace opencode delete pvc opencode-data opencode-config
 > When `existingSecret` is set, the env vars use `optional: true` so a
 > partial Secret (only `OPENAI_API_KEY`, only `ANTHROPIC_API_KEY`, or
 > neither) does not CrashLoopBackOff the pod.
+
+#### GitHub Copilot (OAuth device flow)
+
+Copilot does **not** use API keys — opencode obtains an OAuth token via
+GitHub's device-code flow, which needs a browser. For a headless k8s
+deployment, bootstrap locally and ship the token as a Secret:
+
+```sh
+# On your laptop, with opencode installed:
+opencode auth login          # pick GitHub Copilot, complete the device flow
+# Token lands at ~/.local/share/opencode/auth.json
+
+# Wrap it as a k8s Secret:
+kubectl --namespace opencode create secret generic opencode-copilot \
+  --from-file=auth.json=$HOME/.local/share/opencode/auth.json
+
+# Install / upgrade referencing the Secret:
+helm upgrade --install opencode ./charts/opencode \
+  --namespace opencode --create-namespace \
+  --set providers.copilot.existingSecret=opencode-copilot
+```
+
+On first pod start, an initContainer copies `auth.json` from the Secret into
+the data PVC at `/home/nonroot/.local/share/opencode/auth.json`. After that
+opencode rotates the OAuth token in-pod; the Secret is **not** rewritten —
+it serves only as the bootstrap source.
+
+**Switching the bound GitHub account** requires both updating the Secret AND
+wiping the in-PVC file before the next pod start (the initContainer skips
+when `auth.json` already exists):
+
+```sh
+kubectl --namespace opencode exec deploy/opencode \
+  -- rm -f /home/nonroot/.local/share/opencode/auth.json
+kubectl --namespace opencode rollout restart deploy/opencode
+```
+
+> Some Copilot models require a **GitHub Copilot Pro+** subscription.
 
 ### Persistence
 

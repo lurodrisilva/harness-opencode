@@ -5,7 +5,7 @@ type: application
 
 # Chart SemVer. Bump independently of appVersion when *chart shape* changes
 # (templates, values, schema). Bump appVersion when only the image moves.
-version: 0.1.0
+version: 0.2.0
 
 # Quoted defensively per Helm skill rule — three-segment dotted strings
 # stay strings unquoted, but two-segment (`1.27`) parse as float and

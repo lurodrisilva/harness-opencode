@@ -63,6 +63,18 @@ Run the bundled health test:
 
   helm test {{ .Release.Name }} --namespace {{ .Release.Namespace }}
 
+{{- if eq (include "opencode.copilotEnabled" .) "true" }}
+
+GitHub Copilot bootstrap: the initContainer seeds /home/nonroot/.local/share/opencode/auth.json
+from Secret "{{ .Values.providers.copilot.existingSecret }}" (key "{{ .Values.providers.copilot.secretKey }}") on first start.
+The Secret is read once; opencode rotates the OAuth token in-pod afterward.
+To switch the bound GitHub account, update the Secret AND wipe auth.json:
+
+  kubectl --namespace {{ .Release.Namespace }} exec deploy/{{ include "opencode.fullname" . }} \
+    -- rm -f /home/nonroot/.local/share/opencode/auth.json
+  kubectl --namespace {{ .Release.Namespace }} rollout restart deploy/{{ include "opencode.fullname" . }}
+{{- end }}
+
 {{- if and .Values.persistence.data.enabled (eq (.Values.persistence.data.accessModes | first) "ReadWriteOnce") }}
 
 Note: the data PVC uses ReadWriteOnce — the pod is pinned to whichever node
