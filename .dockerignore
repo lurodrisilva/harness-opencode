@@ -1,0 +1,7 @@
+# Dockerfile fetches everything it needs at build time, so the build context
+# only really needs the Dockerfile itself. Excluding the rest keeps `docker
+# build` snappy and avoids leaking unrelated files into intermediate layers.
+**
+
+!Dockerfile
+!.dockerignore
