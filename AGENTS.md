@@ -25,6 +25,7 @@ package manager.
 | Directory | Purpose |
 |-----------|---------|
 | `.github/` | GitHub Actions workflows (see `.github/AGENTS.md`). |
+| `charts/` | Helm chart packages for deploying the image on Kubernetes (see `charts/AGENTS.md`). |
 | `.omc/` | Agent session state (autopilot specs, plans, learned skills). Not code; deliberately excluded from the AGENTS.md hierarchy. |
 
 ## For AI Agents

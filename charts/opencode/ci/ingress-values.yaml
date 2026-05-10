@@ -1,0 +1,14 @@
+# Lint matrix: ingress + TLS.
+# Verifies the schema's tls-required-when-enabled gate doesn't regress.
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: opencode.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - hosts:
+        - opencode.example.com
+      secretName: opencode-tls

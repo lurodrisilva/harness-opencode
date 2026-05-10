@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "opencode.fullname" . }}-test-health
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opencode.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "opencode.serviceAccountName" . }}
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curl
+      image: curlimages/curl:8.10.1
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -eu
+          # /global/health is unauthenticated by design (k8s probes hit it).
+          BODY="$(curl -fsS --max-time 5 \
+            "http://{{ include "opencode.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/global/health")"
+          echo "body: $BODY"
+          # Whitespace-tolerant — opencode currently emits compact JSON, but
+          # a future formatter switch (e.g. `"healthy" : true`) shouldn't
+          # silently break the test. Tests pod has no jq.
+          echo "$BODY" | grep -Eq '"healthy"[[:space:]]*:[[:space:]]*true'
+          echo "$BODY" | grep -Eq '"version"[[:space:]]*:[[:space:]]*"{{ .Chart.AppVersion }}"'
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      resources:
+        limits:
+          cpu: 100m
+          memory: 64Mi
+        requests:
+          cpu: 10m
+          memory: 16Mi

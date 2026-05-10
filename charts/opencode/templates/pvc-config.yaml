@@ -1,0 +1,24 @@
+{{- if .Values.persistence.config.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "opencode.configPvcName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opencode.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    {{- with .Values.persistence.config.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.config.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.config.size | quote }}
+  {{- $sc := include "opencode.storageClass" .Values.persistence.config.storageClass }}
+  {{- with $sc }}
+  {{ . }}
+  {{- end }}
+{{- end }}

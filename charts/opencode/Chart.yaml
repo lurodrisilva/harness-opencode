@@ -1,0 +1,38 @@
+apiVersion: v2
+name: opencode
+description: Headless opencode AI coding agent server on distroless/cc nonroot.
+type: application
+
+# Chart SemVer. Bump independently of appVersion when *chart shape* changes
+# (templates, values, schema). Bump appVersion when only the image moves.
+version: 0.1.0
+
+# Quoted defensively per Helm skill rule — three-segment dotted strings
+# stay strings unquoted, but two-segment (`1.27`) parse as float and
+# date-shaped values (`2024-05-15`) parse as dates. Always quote.
+appVersion: "1.14.40"
+
+# 1.27 minimum: HPA v2 GA, immutable PVC fields stable, GA pod-security
+# admission. The 0-prerelease suffix lets the chart install on `1.27.0-rc.x`.
+kubeVersion: ">=1.27.0-0"
+
+home: https://opencode.ai
+sources:
+  - https://github.com/sst/opencode
+  - https://opencode.ai/docs/server/
+
+keywords:
+  - ai
+  - agent
+  - opencode
+  - coding-assistant
+  - server
+
+maintainers:
+  - name: lurodrisilva
+    url: https://github.com/lurodrisilva
+
+annotations:
+  # Artifact Hub-friendly metadata — opencode is MIT.
+  artifacthub.io/license: MIT
+  artifacthub.io/category: ai-machine-learning

@@ -1,0 +1,191 @@
+# Default values for opencode.
+# Schema-validated by values.schema.json — install fails fast on misconfiguration.
+
+# -- Replicas. Schema locks max=1: opencode persists session state on RWO PVCs;
+# running >1 pod corrupts state. Horizontal scaling needs a redesign first.
+replicaCount: 1
+
+image:
+  # -- Image registry/repo. No default — set before installing.
+  repository: ghcr.io/lurodrisilva/harness
+  # -- Image tag. Empty falls through to `.Chart.AppVersion`.
+  tag: ""
+  # -- Optional digest pin. When set, image ref becomes `repository@digest` and
+  # `tag` is ignored — the supply-chain-strict path.
+  digest: ""
+  # -- Pull policy. `IfNotPresent` is correct for digest-pinned images;
+  # `Always` defeats reproducibility.
+  pullPolicy: IfNotPresent
+  # -- imagePullSecrets list. Each entry: `{name: my-pull-secret}`.
+  pullSecrets: []
+
+# -- Override release-derived names.
+nameOverride: ""
+fullnameOverride: ""
+
+auth:
+  # -- HTTP basic auth gate. Off = server is RCE-equivalent if any pod or
+  # service exposes it. NOTES.txt fires a hard warning when false.
+  enabled: true
+  # -- Use a pre-existing Secret instead of letting the chart generate one.
+  # When set, `secret-auth.yaml` is skipped. The Secret MUST contain a key
+  # matching `passwordKey` below (the deployment hard-fails on missing keys
+  # in non-existing-secret mode and CrashLoopBackOffs at runtime). The
+  # username key in the BYO Secret is read from `username` (literal name).
+  existingSecret: ""
+  # -- Key inside the Secret holding the password. When using
+  # `existingSecret`, override this to match the key your Secret uses.
+  passwordKey: opencode-server-password
+  # -- Basic-auth username. Default matches opencode's own default.
+  username: opencode
+  # -- Length of the auto-generated password (when `existingSecret` is empty).
+  generatedPasswordLength: 48
+
+providers:
+  # -- Use a pre-existing Secret with provider keys. Expected keys:
+  # `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`. When set, `secret-providers.yaml`
+  # is skipped.
+  existingSecret: ""
+  # -- Inline provider keys. Either may be empty (only that env var is omitted).
+  openaiKey: ""
+  anthropicKey: ""
+
+persistence:
+  # -- Volume for ~/.local/share/opencode (sessions, history, project state).
+  data:
+    enabled: true
+    size: 5Gi
+    # -- Empty = cluster default. `"-"` = explicit "no class" (renders empty
+    # string into storageClassName, which means "use no provisioner").
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    annotations: {}
+  # -- Volume for ~/.config/opencode (auth, config).
+  config:
+    enabled: true
+    size: 256Mi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    annotations: {}
+
+service:
+  # -- ClusterIP only by default — opencode is plain HTTP, expose only through
+  # an in-cluster TLS terminator (Ingress).
+  type: ClusterIP
+  port: 4096
+  annotations: {}
+
+ingress:
+  # -- OFF by default. Opencode speaks plain HTTP; you MUST terminate TLS
+  # upstream. Enabling this requires a non-empty `tls` array (schema-enforced).
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: opencode.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - hosts: [opencode.example.com]
+  #    secretName: opencode-tls
+
+networkPolicy:
+  # -- Default-deny ingress + allow-from selectors + DNS egress.
+  enabled: false
+  # -- Sources allowed to reach the pod. Each entry is a NetworkPolicyPeer
+  # (e.g. `{podSelector: {matchLabels: {app: my-proxy}}}`).
+  ingressFrom: []
+  # -- CIDRs excluded from the public-egress allow rule. Defaults block all
+  # RFC1918 to prevent lateral movement. Override on clusters whose pod/service
+  # CIDRs differ, or to permit reaching an in-cluster LLM proxy at a private IP.
+  egressExcept:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+  # -- Extra egress rules appended verbatim. Each item is a NetworkPolicyEgressRule.
+  # Use this to allow egress to in-cluster proxies (LiteLLM, GenAI gateway, etc).
+  extraEgress: []
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 250m
+    memory: 512Mi
+
+# -- Pod-level security context. uid/gid 65532 matches the distroless `nonroot`
+# user baked into the image.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  # Skip recursive chown when the volume root already matches fsGroup.
+  # Cuts pod start latency on 5Gi+ PVCs (k8s 1.23+ GA).
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context. readOnlyRootFilesystem is safe because
+# opencode writes only to /home/nonroot subtree (PVC-backed).
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+probes:
+  liveness:
+    httpGet:
+      path: /global/health
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    httpGet:
+      path: /global/health
+      port: http
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+  startup:
+    httpGet:
+      path: /global/health
+      port: http
+    initialDelaySeconds: 2
+    periodSeconds: 2
+    timeoutSeconds: 2
+    # -- ~60s startup budget covers DB migration on cold pods.
+    failureThreshold: 30
+
+serviceAccount:
+  create: true
+  # -- Override the SA name. Empty = derived from release.
+  name: ""
+  annotations: {}
+  # -- Opencode never calls the kube API — no token needed.
+  automountServiceAccountToken: false
+
+# -- Arbitrary env passthrough. Each entry is a corev1 EnvVar.
+extraEnv: []
+# -- Arbitrary envFrom passthrough. Each entry is a corev1 EnvFromSource.
+extraEnvFrom: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+podLabels: {}
+
+priorityClassName: ""
+
+topologySpreadConstraints: []

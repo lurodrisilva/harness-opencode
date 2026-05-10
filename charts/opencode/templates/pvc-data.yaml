@@ -1,0 +1,26 @@
+{{- if .Values.persistence.data.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "opencode.dataPvcName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opencode.labels" . | nindent 4 }}
+  annotations:
+    # Preserve session/history data on chart uninstall — the user can wipe
+    # explicitly with `kubectl delete pvc` if intended.
+    helm.sh/resource-policy: keep
+    {{- with .Values.persistence.data.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.data.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.data.size | quote }}
+  {{- $sc := include "opencode.storageClass" .Values.persistence.data.storageClass }}
+  {{- with $sc }}
+  {{ . }}
+  {{- end }}
+{{- end }}
