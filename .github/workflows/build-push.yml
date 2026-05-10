@@ -179,7 +179,16 @@ jobs:
           # trusted, non-PR builds. PRs can read but not poison.
           cache-from: type=gha
           cache-to: ${{ env.IS_PR != 'true' && 'type=gha,mode=max' || '' }}
-          provenance: mode=max
+          # `provenance: mode=max` produces an OCI image index (image
+          # manifest + attestation manifest), which the Docker exporter
+          # used by `load: true` cannot import ("docker exporter does not
+          # currently support exporting manifest lists"). Disable it on
+          # PR builds — those never push, so the embedded in-toto
+          # statement would be discarded anyway. Non-PR builds still get
+          # full provenance, plus the explicit `attest-build-provenance`
+          # step below that publishes a separately-verifiable
+          # GitHub-native attestation.
+          provenance: ${{ env.IS_PR == 'true' && 'false' || 'mode=max' }}
           sbom: false
           build-args: |
             OPENCODE_VERSION=${{ inputs.opencode_version || env.DEFAULT_OPENCODE_VERSION }}
@@ -217,9 +226,12 @@ jobs:
           format: table
 
       # Pass 2: advisory — full severity sweep, SARIF output. exit-code 0
-      # so this never blocks the workflow.
+      # so this never blocks the workflow. Run even if the gate failed so
+      # the Security tab gets the full picture, but skip if the *build*
+      # itself failed — there is no image to scan and `image-ref` would
+      # be empty.
       - name: Trivy SARIF (all severities, advisory)
-        if: always()
+        if: always() && steps.build.outcome == 'success'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         env:
           TRIVY_CACHE_DIR: ${{ github.workspace }}/.cache/trivy
@@ -231,7 +243,7 @@ jobs:
           exit-code: '0'
 
       - name: Upload Trivy SARIF to Security tab
-        if: always()
+        if: always() && hashFiles('trivy-results.sarif') != ''
         uses: github/codeql-action/upload-sarif@7fd177fa680c9881b53cdab4d346d32574c9f7f4  # v3
         with:
           sarif_file: trivy-results.sarif
