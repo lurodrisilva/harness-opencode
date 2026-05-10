@@ -1,0 +1,154 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opencode.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opencode.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # Recreate is mandatory: RWO PVCs cannot be co-mounted by old + new pods
+  # during a rolling update — the new pod would block forever waiting for
+  # the volume.
+  strategy:
+    type: Recreate
+  selector:
+    # IMMUTABLE — never widen this set. Adding fields breaks every upgrade.
+    matchLabels:
+      {{- include "opencode.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opencode.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- if eq (include "opencode.authSecretRendered" .) "true" }}
+        # Roll the pod when the auth Secret content changes (e.g., rotation).
+        checksum/auth-secret: {{ include (print $.Template.BasePath "/secret-auth.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if eq (include "opencode.providersSecretRendered" .) "true" }}
+        checksum/providers-secret: {{ include (print $.Template.BasePath "/secret-providers.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "opencode.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: opencode
+          image: {{ include "opencode.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 4096
+              protocol: TCP
+          env:
+            {{- if .Values.auth.enabled }}
+            - name: OPENCODE_SERVER_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opencode.authSecretName" . }}
+                  key: username
+            - name: OPENCODE_SERVER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opencode.authSecretName" . }}
+                  key: {{ .Values.auth.passwordKey }}
+            {{- end }}
+            {{- /*
+              optional flag rule:
+                existingSecret == ""  → chart renders the Secret with whichever
+                                        keys the user supplied → optional=false
+                                        (we *know* the key exists).
+                existingSecret == "x" → user-supplied Secret may contain only
+                                        one of the two provider keys →
+                                        optional=true so a partial BYO Secret
+                                        does not CrashLoopBackOff.
+            */ -}}
+            {{- if or .Values.providers.existingSecret .Values.providers.openaiKey }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opencode.providersSecretName" . }}
+                  key: OPENAI_API_KEY
+                  optional: {{ ternary false true (empty .Values.providers.existingSecret) }}
+            {{- end }}
+            {{- if or .Values.providers.existingSecret .Values.providers.anthropicKey }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opencode.providersSecretName" . }}
+                  key: ANTHROPIC_API_KEY
+                  optional: {{ ternary false true (empty .Values.providers.existingSecret) }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            # Writable scratch — required because root fs is read-only.
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.persistence.data.enabled }}
+            - name: data
+              mountPath: /home/nonroot/.local/share/opencode
+            {{- end }}
+            {{- if .Values.persistence.config.enabled }}
+            - name: config
+              mountPath: /home/nonroot/.config/opencode
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
+          startupProbe:
+            {{- toYaml .Values.probes.startup | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        {{- if .Values.persistence.data.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "opencode.dataPvcName" . }}
+        {{- end }}
+        {{- if .Values.persistence.config.enabled }}
+        - name: config
+          persistentVolumeClaim:
+            claimName: {{ include "opencode.configPvcName" . }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

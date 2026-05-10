@@ -1,0 +1,71 @@
+opencode {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+{{- if not .Values.auth.enabled }}
+
+⚠️  WARNING: auth.enabled=false — this opencode release is RUNNING UNAUTHENTICATED.
+    Anything that can reach the Service is RCE-equivalent. Do NOT expose this
+    release outside a trusted in-cluster reverse proxy that adds its own auth.
+{{- end }}
+
+{{- if and .Values.auth.enabled (not .Values.auth.existingSecret) }}
+
+The chart auto-generated a {{ .Values.auth.generatedPasswordLength }}-char password.
+Retrieve it with:
+
+  kubectl --namespace {{ .Release.Namespace }} get secret {{ include "opencode.authSecretName" . }} \
+    -o jsonpath='{.data.{{ .Values.auth.passwordKey }}}' | base64 -d
+
+The password persists across upgrades (chart uses lookup-then-fallback).
+Rotate it explicitly by deleting the Secret and running `helm upgrade`.
+{{- end }}
+
+{{- if .Values.ingress.enabled }}
+
+Ingress is enabled. Hostnames:
+{{- range .Values.ingress.hosts }}
+  https://{{ .host }}
+{{- end }}
+
+opencode speaks plain HTTP — your Ingress controller MUST terminate TLS for
+every host above. Verify with:
+
+{{- if and .Values.auth.enabled (not .Values.auth.existingSecret) }}
+  PASSWORD=$(kubectl --namespace {{ .Release.Namespace }} get secret {{ include "opencode.authSecretName" . }} \
+    -o jsonpath='{.data.{{ .Values.auth.passwordKey }}}' | base64 -d)
+  curl -fsS -u {{ .Values.auth.username }}:$PASSWORD https://<host>/global/health
+{{- else if .Values.auth.enabled }}
+  # NOTE: Secret "{{ .Values.auth.existingSecret }}" must contain key "{{ .Values.auth.passwordKey }}".
+  # Override `auth.passwordKey` if your BYO Secret uses a different key name.
+  PASSWORD=$(kubectl --namespace {{ .Release.Namespace }} get secret {{ .Values.auth.existingSecret }} \
+    -o jsonpath='{.data.{{ .Values.auth.passwordKey }}}' | base64 -d)
+  curl -fsS -u {{ .Values.auth.username }}:$PASSWORD https://<host>/global/health
+{{- else }}
+  curl -fsS https://<host>/global/health
+{{- end }}
+{{- else }}
+
+Service is ClusterIP only (no Ingress). Smoke-test with port-forward:
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "opencode.fullname" . }} 4096:{{ .Values.service.port }}
+
+Then in another terminal:
+
+{{- if .Values.auth.enabled }}
+  PASSWORD=$(kubectl --namespace {{ .Release.Namespace }} get secret {{ include "opencode.authSecretName" . }} \
+    -o jsonpath='{.data.{{ .Values.auth.passwordKey }}}' | base64 -d)
+  curl -fsS -u {{ .Values.auth.username }}:$PASSWORD http://127.0.0.1:4096/global/health
+{{- else }}
+  curl -fsS http://127.0.0.1:4096/global/health
+{{- end }}
+{{- end }}
+
+Run the bundled health test:
+
+  helm test {{ .Release.Name }} --namespace {{ .Release.Namespace }}
+
+{{- if and .Values.persistence.data.enabled (eq (.Values.persistence.data.accessModes | first) "ReadWriteOnce") }}
+
+Note: the data PVC uses ReadWriteOnce — the pod is pinned to whichever node
+binds the volume first. Plan node maintenance with `kubectl drain`; the
+Recreate strategy guarantees the pod releases the PVC before rescheduling.
+{{- end }}

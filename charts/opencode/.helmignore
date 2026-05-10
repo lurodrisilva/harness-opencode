@@ -1,0 +1,29 @@
+# Helm-ships-by-default entries
+.DS_Store
+.git/
+.gitignore
+.bzr/
+.bzrignore
+.hg/
+.hgignore
+.svn/
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+
+# Editor / IDE
+.idea/
+.vscode/
+*.tmproj
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Repo extras the chart never needs
+ci/
+tests/
+README.md.tpl
+*.tgz

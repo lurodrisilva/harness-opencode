@@ -163,6 +163,29 @@ readinessProbe:
 (There is no `HEALTHCHECK` in the Dockerfile because distroless ships no
 `curl` / `wget` to invoke; the orchestrator probes externally.)
 
+## Helm chart
+
+A production-ready Helm chart lives at `charts/opencode/` and packages the
+image with hard-schema-validated values, auto-generated auth Secret with
+rotation safety, two RWO PVCs (sessions + config), and a built-in `helm test`
+that hits `/global/health`.
+
+```sh
+helm install opencode ./charts/opencode \
+  --namespace opencode --create-namespace
+
+# Retrieve the auto-generated password
+kubectl --namespace opencode get secret opencode-auth \
+  -o jsonpath='{.data.opencode-server-password}' | base64 -d
+
+# Verify
+helm test opencode --namespace opencode
+```
+
+The chart is `ClusterIP`-only by default. Enable an ingress only with TLS
+configured — the schema rejects `ingress.enabled=true` with empty `tls`. See
+`charts/opencode/README.md` for the full values reference.
+
 ## Why distroless/cc and not distroless/static
 
 opencode 1.14.40 binaries are Bun-compiled but **dynamically linked**.
