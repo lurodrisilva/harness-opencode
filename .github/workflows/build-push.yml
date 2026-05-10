@@ -1,0 +1,271 @@
+name: Build, scan, attest, push
+
+# Builds the opencode distroless image for linux/amd64 and linux/arm64,
+# scans it with Trivy (gated on CRITICAL CVEs), pushes to GHCR, and
+# generates GitHub-native build provenance + SPDX SBOM attestations.
+#
+# Verify a published image with:
+#   gh attestation verify oci://ghcr.io/<owner>/<repo>:<tag> --owner <owner>
+#
+# All third-party actions are pinned to a commit SHA. The `# v…` comment
+# next to each `uses:` line is the human-readable version at the time of
+# pinning. Bump SHAs deliberately (e.g. via Renovate) — never via floating
+# tags.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  # Restrict pull_request triggers to changes that can actually affect the
+  # image. Doc-only PRs don't need a 15-minute QEMU-emulated arm64 build.
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - .github/workflows/build-push.yml
+      - smoke-test.sh
+  workflow_dispatch:
+    inputs:
+      opencode_version:
+        description: opencode version baked into the image (default 1.14.40)
+        required: false
+      opencode_sha256_amd64:
+        description: SHA-256 of opencode-linux-x64-${version}.tgz
+        required: false
+      opencode_sha256_arm64:
+        description: SHA-256 of opencode-linux-arm64-${version}.tgz
+        required: false
+
+# Least-privilege defaults. Individual jobs may not widen these.
+permissions:
+  contents: read
+  packages: write          # push to ghcr.io
+  id-token: write          # OIDC for Sigstore-backed attestations
+  attestations: write      # GitHub-native attestation API
+  security-events: write   # SARIF upload to Security tab
+
+# A run for the same ref supersedes earlier runs.
+concurrency:
+  group: build-push-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  # ghcr.io requires a lowercase image path; github.repository may contain
+  # uppercase letters. Lowercase explicitly inside the build job.
+  IMAGE_PATH: ${{ github.repository }}
+  DEFAULT_OPENCODE_VERSION: '1.14.40'
+  DEFAULT_OPENCODE_SHA256_AMD64: f662a6ad1c6ecd6dee43e712c6b1ea814de38d27e2f983ca41e7f29b98f5f2ef
+  DEFAULT_OPENCODE_SHA256_ARM64: 10d4ad7c8000427f137ac835dcc8b7960ce7ebda7c1fd87e594e5f4db4e9d9f7
+
+jobs:
+  build:
+    name: Build, scan, attest, push
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # Resolved once so step-level `if:` and platform/cache expressions can
+      # share the same predicate.
+      IS_PR: ${{ github.event_name == 'pull_request' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      # Validate workflow_dispatch inputs before any build work runs.
+      # Defends against an actor with `actions:write` passing a malformed
+      # version or a non-hex SHA into the build-args plumbing.
+      - name: Validate workflow_dispatch inputs
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          OPENCODE_VERSION: ${{ inputs.opencode_version }}
+          SHA_AMD64: ${{ inputs.opencode_sha256_amd64 }}
+          SHA_ARM64: ${{ inputs.opencode_sha256_arm64 }}
+        run: |
+          set -euo pipefail
+          if [ -n "$OPENCODE_VERSION" ] && ! [[ "$OPENCODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.+-]+)?$ ]]; then
+            echo "ERROR: opencode_version must look like 1.2.3 or 1.2.3-rc1" >&2; exit 1
+          fi
+          for var_name in SHA_AMD64 SHA_ARM64; do
+            value="${!var_name}"
+            if [ -n "$value" ] && ! [[ "$value" =~ ^[a-f0-9]{64}$ ]]; then
+              echo "ERROR: $var_name must be a 64-char hex SHA-256, got '${value}'" >&2; exit 1
+            fi
+          done
+
+      # arm64 emulation on the amd64 runner. Required because we build a
+      # multi-arch image from a single host. amd64 builds don't go through
+      # QEMU; arm64 builds do.
+      - name: Set up QEMU (binfmt for cross-arch)
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      # Lowercase the image path. ghcr.io rejects uppercase characters in
+      # the image name, but `github.repository` preserves the original case.
+      # Both REGISTRY and IMAGE_PATH come from the workflow `env:` block.
+      - name: Compute lowercase image path
+        id: img
+        run: |
+          set -euo pipefail
+          lc="$(printf '%s' "$IMAGE_PATH" | tr '[:upper:]' '[:lower:]')"
+          echo "ref=${REGISTRY}/${lc}" >> "$GITHUB_OUTPUT"
+
+      # Skip the registry login on pull_request runs — those builds never push.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tag generation. Output `tags` is multi-line; downstream actions
+      # accept it as-is.
+      - name: Generate metadata (tags + OCI labels)
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
+        with:
+          images: ${{ steps.img.outputs.ref }}
+          # `latest` is reserved for stable semver tags only — prerelease
+          # tags (`v1.2.3-rc1`, `v1.2.3-beta`) get the explicit version
+          # tags but never overwrite `latest`.
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+            type=sha,prefix=sha-,format=short
+
+      # Trivy DB cache. Aqua's public DB is rate-limited; refreshing once
+      # per ISO week strikes a balance between freshness and rate-limit
+      # avoidance.
+      - name: Compute Trivy cache key (year-week)
+        id: trivy_key
+        run: echo "key=trivy-db-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Trivy DB
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: ${{ github.workspace }}/.cache/trivy
+          key: ${{ steps.trivy_key.outputs.key }}
+          restore-keys: trivy-db-
+
+      # PR: build linux/amd64 only and load it into the local Docker daemon
+      # so Trivy can scan it without a registry pull. push: false.
+      # Non-PR: build linux/amd64,linux/arm64, push to GHCR, no local load.
+      # `provenance: mode=max` embeds an SLSA-style in-toto provenance
+      # statement in the OCI index. We layer GitHub-native attestations
+      # on top of that for verifier-friendly access via `gh attestation`.
+      - name: Build (and push if non-PR)
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: .
+          file: Dockerfile
+          # PR builds: amd64-only + load:true so Trivy can scan locally
+          # without a registry pull. Non-PR: full multi-arch + push.
+          platforms: ${{ env.IS_PR == 'true' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          push: ${{ env.IS_PR != 'true' }}
+          load: ${{ env.IS_PR == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          # Read cache from any branch, but only WRITE the cache from
+          # trusted, non-PR builds. PRs can read but not poison.
+          cache-from: type=gha
+          cache-to: ${{ env.IS_PR != 'true' && 'type=gha,mode=max' || '' }}
+          provenance: mode=max
+          sbom: false
+          build-args: |
+            OPENCODE_VERSION=${{ inputs.opencode_version || env.DEFAULT_OPENCODE_VERSION }}
+            OPENCODE_TARBALL_SHA256_AMD64=${{ inputs.opencode_sha256_amd64 || env.DEFAULT_OPENCODE_SHA256_AMD64 }}
+            OPENCODE_TARBALL_SHA256_ARM64=${{ inputs.opencode_sha256_arm64 || env.DEFAULT_OPENCODE_SHA256_ARM64 }}
+
+      # Resolve a single image ref for Trivy. metadata-action emits a
+      # multi-line `tags` string; the first line is fine for scanning
+      # because every tag points at the same digest.
+      - name: Pick scan target
+        id: scan_target
+        env:
+          ALL_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          first_tag="$(printf '%s\n' "$ALL_TAGS" | head -n 1)"
+          if [ -z "$first_tag" ]; then
+            echo "ERROR: metadata-action produced no tags" >&2; exit 1
+          fi
+          echo "ref=$first_tag" >> "$GITHUB_OUTPUT"
+
+      # Pass 1: blocking gate — fail the workflow on any CRITICAL CVE that
+      # has a known fix. `ignore-unfixed: true` keeps the gate signal
+      # actionable; we don't want to fail builds for CVEs upstream hasn't
+      # patched yet.
+      - name: Trivy gate (CRITICAL only)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        env:
+          TRIVY_CACHE_DIR: ${{ github.workspace }}/.cache/trivy
+        with:
+          image-ref: ${{ steps.scan_target.outputs.ref }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+
+      # Pass 2: advisory — full severity sweep, SARIF output. exit-code 0
+      # so this never blocks the workflow.
+      - name: Trivy SARIF (all severities, advisory)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        env:
+          TRIVY_CACHE_DIR: ${{ github.workspace }}/.cache/trivy
+        with:
+          image-ref: ${{ steps.scan_target.outputs.ref }}
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: '0'
+
+      - name: Upload Trivy SARIF to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@7fd177fa680c9881b53cdab4d346d32574c9f7f4  # v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+      # SPDX-JSON SBOM. Generated against the pushed digest (skipped on PR
+      # because there is no published digest to attach the attestation to).
+      - name: Generate SPDX SBOM
+        if: github.event_name != 'pull_request'
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0
+        with:
+          image: ${{ steps.scan_target.outputs.ref }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          # Don't upload the SBOM as a release artifact — `attest-sbom`
+          # publishes it next to the image instead.
+          upload-artifact: false
+          upload-release-assets: false
+
+      # GitHub-native build provenance, attached to every pushed digest.
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be  # v2
+        with:
+          subject-name: ${{ steps.scan_target.outputs.ref }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # GitHub-native SBOM attestation, attached to every pushed digest.
+      - name: Attest SBOM
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b  # v2
+        with:
+          subject-name: ${{ steps.scan_target.outputs.ref }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom.spdx.json
+          push-to-registry: true
