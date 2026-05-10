@@ -94,18 +94,29 @@ When fronted, also configure the proxy to:
 
 ## Build args
 
+The Dockerfile selects the right opencode binary per `TARGETARCH` and
+verifies it against a per-arch SHA-256. Both arches are baked into the
+default values:
+
 ```sh
 docker build \
   --build-arg OPENCODE_VERSION=1.14.40 \
-  --build-arg OPENCODE_TARBALL_SHA256=f662a6ad1c6ecd6dee43e712c6b1ea814de38d27e2f983ca41e7f29b98f5f2ef \
+  --build-arg OPENCODE_TARBALL_SHA256_AMD64=f662a6ad1c6ecd6dee43e712c6b1ea814de38d27e2f983ca41e7f29b98f5f2ef \
+  --build-arg OPENCODE_TARBALL_SHA256_ARM64=10d4ad7c8000427f137ac835dcc8b7960ce7ebda7c1fd87e594e5f4db4e9d9f7 \
   -t opencode:1.14.40 .
 ```
 
-When bumping `OPENCODE_VERSION`, recompute the SHA-256:
+For multi-arch builds, use `docker buildx`:
 
 ```sh
-curl -fsSL "https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-${VERSION}.tgz" \
-  | sha256sum
+docker buildx build --platform linux/amd64,linux/arm64 -t opencode:1.14.40 --push .
+```
+
+When bumping `OPENCODE_VERSION`, recompute both SHA-256 values:
+
+```sh
+curl -fsSL "https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-${VERSION}.tgz"   | sha256sum
+curl -fsSL "https://registry.npmjs.org/opencode-linux-arm64/-/opencode-linux-arm64-${VERSION}.tgz" | sha256sum
 ```
 
 The SHA pin protects against tarball mutation in transit but does **not**
@@ -183,4 +194,59 @@ everything down.
 - Exposed port: `4096`
 - Entry: `/usr/local/bin/opencode`
 - Default args: `serve --port 4096 --hostname 0.0.0.0 --print-logs`
-- Architecture: `linux/amd64` only (build fails on other `TARGETARCH`)
+- Architectures: `linux/amd64`, `linux/arm64`. Other values of
+  `TARGETARCH` fail the build with a clear error.
+
+## CI / GHA workflow
+
+`.github/workflows/build-push.yml` builds the image for both arches and
+publishes it to `ghcr.io/<owner>/<repo>` on every push to `main` and on
+every `v*.*.*` tag. Pull requests build (loaded into the runner only) so
+Dockerfile changes are validated, but never push.
+
+The workflow:
+
+- Pins every third-party action to a commit SHA (the `# v…` comment next
+  to each `uses:` line is the human-readable version at the time of
+  pinning).
+- Runs Trivy twice per image: a blocking gate that fails the workflow on
+  fixable `CRITICAL` CVEs, then an advisory pass over all severities that
+  uploads SARIF to the GitHub Security tab.
+- Generates an SPDX-JSON SBOM with `anchore/sbom-action`.
+- Attaches both a build-provenance and an SBOM attestation (Sigstore-
+  backed, signed via OIDC) to every pushed digest using GitHub-native
+  `actions/attest-build-provenance` and `actions/attest-sbom`.
+- Uses the minimum permissions required (`contents:read`,
+  `packages:write`, `id-token:write`, `attestations:write`,
+  `security-events:write`).
+
+### Verifying a published image
+
+GitHub CLI ≥ 2.49 ships `gh attestation verify` for OCI subjects:
+
+```sh
+gh attestation verify \
+  oci://ghcr.io/<owner>/<repo>:<tag> \
+  --owner <owner>
+```
+
+List every attestation on a digest:
+
+```sh
+gh attestation list ghcr.io/<owner>/<repo>:<tag>
+```
+
+Pull the SBOM attestation back out of the registry (cosign):
+
+```sh
+cosign download attestation \
+  --predicate-type=https://spdx.dev/Document \
+  ghcr.io/<owner>/<repo>:<tag>
+```
+
+### Manually triggering with a different opencode version
+
+`workflow_dispatch` accepts three optional inputs:
+`opencode_version`, `opencode_sha256_amd64`, `opencode_sha256_arm64`. They
+override the defaults baked into the workflow. All three should be set
+together — bumping the version without the matching SHAs fails the build.
