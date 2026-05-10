@@ -14,7 +14,7 @@ name: Build, scan, attest, push
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     tags: ['v*.*.*']
   # Restrict pull_request triggers to changes that can actually affect the
   # image. Doc-only PRs don't need a 15-minute QEMU-emulated arm64 build.
@@ -24,6 +24,12 @@ on:
       - .dockerignore
       - .github/workflows/build-push.yml
       - smoke-test.sh
+  # Fire when a PR enters the GitHub merge queue. The merge queue runs
+  # required checks against the projected post-merge tree, so this is
+  # the canonical "merge event" — it gates the actual merge into
+  # `master` instead of running afterwards. Required checks must pass
+  # here for the queue to land the PR.
+  merge_group:
   workflow_dispatch:
     inputs:
       opencode_version:
@@ -64,9 +70,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      # Resolved once so step-level `if:` and platform/cache expressions can
-      # share the same predicate.
-      IS_PR: ${{ github.event_name == 'pull_request' }}
+      # "Verify" runs (pull_request + merge_group) build and scan but
+      # never push, write cache, log into ghcr, or attest. The merge
+      # queue runs against an ephemeral `gh-readonly-queue/*` branch
+      # that is discarded if any required check fails — pushing images
+      # for those would publish artifacts that may never land in
+      # `master`. Resolved once so every downstream `if:` and the
+      # build-arg expressions share the same predicate.
+      IS_VERIFY: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
     steps:
       - name: Checkout
@@ -114,9 +125,10 @@ jobs:
           lc="$(printf '%s' "$IMAGE_PATH" | tr '[:upper:]' '[:lower:]')"
           echo "ref=${REGISTRY}/${lc}" >> "$GITHUB_OUTPUT"
 
-      # Skip the registry login on pull_request runs — those builds never push.
+      # Skip the registry login on verify-only runs (pull_request +
+      # merge_group) — those builds never push.
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: env.IS_VERIFY != 'true'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -155,40 +167,42 @@ jobs:
           key: ${{ steps.trivy_key.outputs.key }}
           restore-keys: trivy-db-
 
-      # PR: build linux/amd64 only and load it into the local Docker daemon
-      # so Trivy can scan it without a registry pull. push: false.
-      # Non-PR: build linux/amd64,linux/arm64, push to GHCR, no local load.
+      # Verify (pull_request + merge_group): build linux/amd64 only and
+      # load it into the local Docker daemon so Trivy can scan it
+      # without a registry pull. push: false. Publish runs (push to
+      # master / tags / workflow_dispatch): build linux/amd64+linux/arm64,
+      # push to GHCR, no local load.
       # `provenance: mode=max` embeds an SLSA-style in-toto provenance
       # statement in the OCI index. We layer GitHub-native attestations
       # on top of that for verifier-friendly access via `gh attestation`.
-      - name: Build (and push if non-PR)
+      - name: Build (and push on publish runs)
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
           file: Dockerfile
-          # PR builds: amd64-only + load:true so Trivy can scan locally
-          # without a registry pull. Non-PR: full multi-arch + push.
-          platforms: ${{ env.IS_PR == 'true' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
-          push: ${{ env.IS_PR != 'true' }}
-          load: ${{ env.IS_PR == 'true' }}
+          # Verify builds: amd64-only + load:true so Trivy can scan
+          # locally without a registry pull. Publish: full multi-arch + push.
+          platforms: ${{ env.IS_VERIFY == 'true' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          push: ${{ env.IS_VERIFY != 'true' }}
+          load: ${{ env.IS_VERIFY == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
           # Read cache from any branch, but only WRITE the cache from
-          # trusted, non-PR builds. PRs can read but not poison.
+          # trusted publish runs. Verify runs can read but not poison.
           cache-from: type=gha
-          cache-to: ${{ env.IS_PR != 'true' && 'type=gha,mode=max' || '' }}
+          cache-to: ${{ env.IS_VERIFY != 'true' && 'type=gha,mode=max' || '' }}
           # `provenance: mode=max` produces an OCI image index (image
           # manifest + attestation manifest), which the Docker exporter
           # used by `load: true` cannot import ("docker exporter does not
           # currently support exporting manifest lists"). Disable it on
-          # PR builds — those never push, so the embedded in-toto
-          # statement would be discarded anyway. Non-PR builds still get
+          # verify builds — those never push, so the embedded in-toto
+          # statement would be discarded anyway. Publish runs still get
           # full provenance, plus the explicit `attest-build-provenance`
           # step below that publishes a separately-verifiable
           # GitHub-native attestation.
-          provenance: ${{ env.IS_PR == 'true' && 'false' || 'mode=max' }}
+          provenance: ${{ env.IS_VERIFY == 'true' && 'false' || 'mode=max' }}
           sbom: false
           build-args: |
             OPENCODE_VERSION=${{ inputs.opencode_version || env.DEFAULT_OPENCODE_VERSION }}
@@ -249,10 +263,10 @@ jobs:
           sarif_file: trivy-results.sarif
           category: trivy
 
-      # SPDX-JSON SBOM. Generated against the pushed digest (skipped on PR
-      # because there is no published digest to attach the attestation to).
+      # SPDX-JSON SBOM. Generated against the pushed digest (skipped on
+      # verify runs — no published digest to attach the attestation to).
       - name: Generate SPDX SBOM
-        if: github.event_name != 'pull_request'
+        if: env.IS_VERIFY != 'true'
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0
         with:
           image: ${{ steps.scan_target.outputs.ref }}@${{ steps.build.outputs.digest }}
@@ -265,7 +279,7 @@ jobs:
 
       # GitHub-native build provenance, attached to every pushed digest.
       - name: Attest build provenance
-        if: github.event_name != 'pull_request'
+        if: env.IS_VERIFY != 'true'
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be  # v2
         with:
           subject-name: ${{ steps.scan_target.outputs.ref }}
@@ -274,7 +288,7 @@ jobs:
 
       # GitHub-native SBOM attestation, attached to every pushed digest.
       - name: Attest SBOM
-        if: github.event_name != 'pull_request'
+        if: env.IS_VERIFY != 'true'
         uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b  # v2
         with:
           subject-name: ${{ steps.scan_target.outputs.ref }}
