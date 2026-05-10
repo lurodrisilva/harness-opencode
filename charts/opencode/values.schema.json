@@ -60,7 +60,17 @@
       "properties": {
         "existingSecret": { "type": "string" },
         "openaiKey": { "type": "string" },
-        "anthropicKey": { "type": "string" }
+        "anthropicKey": { "type": "string" },
+        "copilot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["existingSecret", "secretKey", "initImage"],
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "secretKey": { "type": "string", "minLength": 1 },
+            "initImage": { "type": "string", "minLength": 1 }
+          }
+        }
       }
     },
     "persistence": {
@@ -200,6 +210,37 @@
             "properties": { "enabled": { "const": false } }
           }
         }
+      }
+    },
+    {
+      "$comment": "Copilot bootstrap seeds the data PVC via initContainer. Without persistence.data.enabled there is nowhere to write auth.json — disallow that combination.",
+      "if": {
+        "properties": {
+          "providers": {
+            "properties": {
+              "copilot": {
+                "properties": { "existingSecret": { "type": "string", "minLength": 1 } },
+                "required": ["existingSecret"]
+              }
+            },
+            "required": ["copilot"]
+          }
+        },
+        "required": ["providers"]
+      },
+      "then": {
+        "properties": {
+          "persistence": {
+            "properties": {
+              "data": {
+                "properties": { "enabled": { "const": true } },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["data"]
+          }
+        },
+        "required": ["persistence"]
       }
     }
   ],

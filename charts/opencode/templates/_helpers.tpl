@@ -114,6 +114,15 @@ true
 {{- end -}}
 
 {{/*
+True iff Copilot OAuth seeding is configured.
+*/}}
+{{- define "opencode.copilotEnabled" -}}
+{{- if and .Values.providers.copilot .Values.providers.copilot.existingSecret -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
 storageClassName field renderer. Three states:
   - empty value -> omit field entirely (use cluster default)
   - "-"          -> render `storageClassName: ""` (explicit "no class")

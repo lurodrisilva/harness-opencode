@@ -1,0 +1,7 @@
+# Lint matrix: GitHub Copilot OAuth seeding via initContainer.
+# Verifies the copilot-seed volume + initContainer render, and that the
+# schema gate (copilot requires persistence.data.enabled=true) is satisfied
+# by the default persistence.data.enabled=true.
+providers:
+  copilot:
+    existingSecret: opencode-copilot

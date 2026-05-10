@@ -45,6 +45,48 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if eq (include "opencode.copilotEnabled" .) "true" }}
+      initContainers:
+        # Seed the GitHub Copilot OAuth auth.json into the data PVC on first
+        # start. Idempotent: skips when the file already exists, so subsequent
+        # restarts preserve any token rotation opencode performed in-pod.
+        # Rotate by updating the Secret AND deleting auth.json from the PVC
+        # before the next pod start.
+        - name: copilot-auth-seed
+          image: {{ .Values.providers.copilot.initImage | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              TARGET=/data/auth.json
+              if [ -s "$TARGET" ]; then
+                echo "auth.json already present in data PVC; skipping seed."
+                exit 0
+              fi
+              cp "/seed/{{ .Values.providers.copilot.secretKey }}" "$TARGET"
+              chmod 600 "$TARGET"
+              echo "Seeded $TARGET from Secret {{ .Values.providers.copilot.existingSecret }}."
+          volumeMounts:
+            - name: copilot-seed
+              mountPath: /seed
+              readOnly: true
+            - name: data
+              mountPath: /data
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: 100m
+              memory: 32Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+      {{- end }}
       containers:
         - name: opencode
           image: {{ include "opencode.image" . | quote }}
@@ -135,6 +177,15 @@ spec:
         - name: config
           persistentVolumeClaim:
             claimName: {{ include "opencode.configPvcName" . }}
+        {{- end }}
+        {{- if eq (include "opencode.copilotEnabled" .) "true" }}
+        - name: copilot-seed
+          secret:
+            secretName: {{ .Values.providers.copilot.existingSecret }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.providers.copilot.secretKey }}
+                path: {{ .Values.providers.copilot.secretKey }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

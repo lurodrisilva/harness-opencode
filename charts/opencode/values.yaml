@@ -49,6 +49,20 @@ providers:
   # -- Inline provider keys. Either may be empty (only that env var is omitted).
   openaiKey: ""
   anthropicKey: ""
+  # GitHub Copilot uses OAuth device flow, not API keys. Bootstrap locally with
+  # `opencode auth login` → select GitHub Copilot → complete the browser flow,
+  # then ship the resulting `~/.local/share/opencode/auth.json` as a k8s Secret
+  # and reference it here. An initContainer seeds the data PVC on first start.
+  # Token refresh after bootstrap stays in the PVC; the Secret is not rewritten.
+  copilot:
+    # -- Secret name holding the bootstrap `auth.json`. Empty disables Copilot
+    # seeding. Requires `persistence.data.enabled=true` (schema-enforced).
+    existingSecret: ""
+    # -- Key inside the Secret holding the JSON blob.
+    secretKey: auth.json
+    # -- Image used by the seeding initContainer. Override for air-gapped /
+    # internal-registry deployments. Needs `sh` + `cp` + `chmod`.
+    initImage: busybox:1.37.0
 
 persistence:
   # -- Volume for ~/.local/share/opencode (sessions, history, project state).
