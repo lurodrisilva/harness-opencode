@@ -6,9 +6,14 @@
 replicaCount: 1
 
 image:
-  # -- Image registry/repo. No default — set before installing.
-  repository: ghcr.io/lurodrisilva/harness
-  # -- Image tag. Empty falls through to `.Chart.AppVersion`.
+  # -- Image registry/repo. Published by the bundled GHA workflow on every
+  # push to master and on `v*.*.*` git tags.
+  repository: ghcr.io/lurodrisilva/harness-opencode
+  # -- Image tag. Empty falls through to `.Chart.AppVersion` — which the
+  # workflow publishes only when the matching `v<AppVersion>` git tag is
+  # cut. For testing against master (or before any release tag exists),
+  # override with `--set image.tag=master`. Production deployments should
+  # set `image.digest` instead.
   tag: ""
   # -- Optional digest pin. When set, image ref becomes `repository@digest` and
   # `tag` is ignored — the supply-chain-strict path.

@@ -4,10 +4,16 @@ Headless [opencode](https://opencode.ai) AI coding agent server on Kubernetes.
 
 | Field            | Value          |
 |------------------|----------------|
-| Chart version    | 0.2.0          |
+| Chart version    | 0.3.0          |
 | App version      | 1.14.40        |
 | Min `kubeVersion`| `>=1.27.0-0`   |
-| Image            | `ghcr.io/lurodrisilva/harness:1.14.40` (override `image.repository`) |
+| Image            | `ghcr.io/lurodrisilva/harness-opencode:<AppVersion>` (override `image.tag`/`image.digest`) |
+
+> **Image tag note:** the default `image.tag` is empty, so the deployment
+> resolves to `ghcr.io/lurodrisilva/harness-opencode:<.Chart.AppVersion>`.
+> The GHA workflow only publishes that tag when a matching `v<AppVersion>`
+> git tag exists. Until then, install with `--set image.tag=master` (rolling)
+> or pin via `--set image.digest=sha256:…` (supply-chain-strict).
 
 > ## ⚠️ Read first — security defaults
 >
@@ -210,8 +216,13 @@ kubectl --namespace opencode rollout restart deploy/opencode
 
 ### Probes
 
-All three (`liveness`, `readiness`, `startup`) hit `/global/health` on
-`port: http`. The startup probe budgets ~60s for DB migration.
+opencode applies HTTP basic auth to **every** route (including
+`/global/health`); kubelet probes don't carry credentials. The chart works
+around this by emitting `tcpSocket` probes whenever `auth.enabled=true`,
+and `httpGet /global/health` probes when auth is disabled. Both modes
+honour the `probes.{liveness,readiness,startup}.{initialDelaySeconds,
+periodSeconds,timeoutSeconds,failureThreshold}` knobs from `values.yaml`.
+The startup probe budgets ~60s for cold-start cache provisioning.
 
 ## Sizing notes
 

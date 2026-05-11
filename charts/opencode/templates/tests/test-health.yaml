@@ -22,12 +22,33 @@ spec:
     - name: curl
       image: curlimages/curl:8.10.1
       imagePullPolicy: IfNotPresent
+      {{- if .Values.auth.enabled }}
+      # opencode's HTTP basic auth covers every route, including
+      # /global/health. The test pod must read the same credentials the
+      # server uses, otherwise curl gets 401 and the test fails despite a
+      # healthy server.
+      env:
+        - name: AUTH_USER
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "opencode.authSecretName" . }}
+              key: username
+        - name: AUTH_PASS
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "opencode.authSecretName" . }}
+              key: {{ .Values.auth.passwordKey }}
+      {{- end }}
       command: ["sh", "-c"]
       args:
         - |
           set -eu
-          # /global/health is unauthenticated by design (k8s probes hit it).
-          BODY="$(curl -fsS --max-time 5 \
+          {{- if .Values.auth.enabled }}
+          AUTH="-u ${AUTH_USER}:${AUTH_PASS}"
+          {{- else }}
+          AUTH=""
+          {{- end }}
+          BODY="$(curl -fsS --max-time 5 $AUTH \
             "http://{{ include "opencode.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/global/health")"
           echo "body: $BODY"
           # Whitespace-tolerant — opencode currently emits compact JSON, but

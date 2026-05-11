@@ -145,6 +145,11 @@ spec:
             # Writable scratch — required because root fs is read-only.
             - name: tmp
               mountPath: /tmp
+            # opencode caches downloaded LSP binaries, model metadata, etc. at
+            # ~/.cache/opencode/. EmptyDir is sufficient — cache is regenerable
+            # and per-pod, no need to persist across restarts.
+            - name: cache
+              mountPath: /home/nonroot/.cache
             {{- if .Values.persistence.data.enabled }}
             - name: data
               mountPath: /home/nonroot/.local/share/opencode
@@ -153,12 +158,45 @@ spec:
             - name: config
               mountPath: /home/nonroot/.config/opencode
             {{- end }}
+          {{- /*
+            Probe shape depends on auth: opencode's HTTP basic-auth covers
+            every route including /global/health. Kubelet probes don't carry
+            credentials, so httpGet on the health path returns 401 and the
+            pod CrashLoopBackOffs. When auth is enabled we fall back to a
+            tcpSocket probe — it can't detect an application-level deadlock
+            but it does catch listener crash, which is the dominant failure.
+            When auth is disabled, httpGet against /global/health is fine.
+          */ -}}
+          {{- if .Values.auth.enabled }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          startupProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          {{- else }}
           livenessProbe:
             {{- toYaml .Values.probes.liveness | nindent 12 }}
           readinessProbe:
             {{- toYaml .Values.probes.readiness | nindent 12 }}
           startupProbe:
             {{- toYaml .Values.probes.startup | nindent 12 }}
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
@@ -168,6 +206,9 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 64Mi
+        - name: cache
+          emptyDir:
+            sizeLimit: 512Mi
         {{- if .Values.persistence.data.enabled }}
         - name: data
           persistentVolumeClaim:
